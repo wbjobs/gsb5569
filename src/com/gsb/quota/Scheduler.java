@@ -93,6 +93,7 @@ public class Scheduler {
     private boolean running;
     private boolean shutdown;
     private long generation;
+    private long waitingGeneration;
     private int inFlight;
     private boolean dispatcherWaiting;
     private long taskSequence;
@@ -263,14 +264,16 @@ public class Scheduler {
     boolean awaitIdle(long timeoutMillis) throws InterruptedException {
         synchronized (lock) {
             long deadline = System.nanoTime() + timeoutMillis * 1000000L;
-            while (!(dispatcherWaiting && inFlight == 0)) {
+            for (;;) {
+                if (dispatcherWaiting && inFlight == 0 && waitingGeneration == generation) {
+                    return true;
+                }
                 long remaining = deadline - System.nanoTime();
                 if (remaining <= 0) {
                     return false;
                 }
                 lock.wait(remaining / 1000000L, (int) (remaining % 1000000L));
             }
-            return true;
         }
     }
 
@@ -286,16 +289,21 @@ public class Scheduler {
                     accrueGlobalLocked(now);
                 }
                 if (!running) {
-                    break;
-                }
-                long deadline = nextDeadlineLocked(now);
-                Object handle = null;
-                if (deadline != Long.MAX_VALUE) {
-                    handle = clock.scheduleWakeup(deadline, wakeupCallback);
-                }
+                break;
+            }
+            long deadline = nextDeadlineLocked(now);
+            // Snapshot the generation before arming the wakeup: if the deadline
+            // already passed, the callback fires synchronously and bumps the
+            // generation, which must not be mistaken for a consumed wakeup.
+            long observedGeneration = generation;
+            Object handle = null;
+            if (deadline != Long.MAX_VALUE) {
+                handle = clock.scheduleWakeup(deadline, wakeupCallback);
+            }
+            if (generation == observedGeneration && running) {
                 dispatcherWaiting = true;
+                waitingGeneration = observedGeneration;
                 lock.notifyAll();
-                long observedGeneration = generation;
                 try {
                     while (generation == observedGeneration && running) {
                         lock.wait();
@@ -306,11 +314,12 @@ public class Scheduler {
                     return;
                 }
                 dispatcherWaiting = false;
-                if (handle != null) {
-                    clock.cancelWakeup(handle);
-                }
+            }
+            if (handle != null) {
+                clock.cancelWakeup(handle);
             }
         }
+    }
     }
 
     private void accrueGlobalLocked(long now) {
@@ -385,7 +394,10 @@ public class Scheduler {
                 continue;
             }
             anyQueued = true;
-            if (tenant.nextTokenNanos < deadline) {
+            // Only tenants still waiting for a token contribute a deadline;
+            // a tenant whose token is already available (nextTokenNanos <= now)
+            // is blocked solely on the global allowance, handled below.
+            if (tenant.nextTokenNanos > now && tenant.nextTokenNanos < deadline) {
                 deadline = tenant.nextTokenNanos;
             }
         }

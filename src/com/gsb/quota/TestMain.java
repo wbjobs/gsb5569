@@ -171,6 +171,8 @@ public class TestMain {
         for (int i = 0; i < 6; i++) {
             scheduler.submit("T", NOOP);
         }
+        // Let the t=0 token get consumed at t=0 before advancing the clock.
+        check(scheduler.awaitIdle(10000), "idle at t=0");
         for (int i = 0; i < 4; i++) {
             clock.advanceBy(STEP_200MS);
             check(scheduler.awaitIdle(10000), "idle at step " + i);
@@ -215,6 +217,7 @@ public class TestMain {
         check(scheduler.completedCount("T") == 5,
                 "window [5s,6s) must not exceed quota, got " + scheduler.completedCount("T"));
         clock.advanceBy(1);
+        check(scheduler.awaitIdle(10000), "idle at 6s");
         clock.advanceBy(STEP_200MS);
         check(scheduler.awaitIdle(10000), "idle at 6.2s");
         check(scheduler.completedCount("T") == 7,
@@ -263,7 +266,12 @@ public class TestMain {
         for (int i = 0; i < 5; i++) {
             scheduler.submit("T", NOOP);
         }
-        check(scheduler.awaitIdle(10000), "system clock scheduler did not drain 5 tasks");
+        // Real clock: tokens trickle in at 100us intervals, so poll the
+        // completion count with a generous real-time deadline.
+        long deadline = System.currentTimeMillis() + 10000;
+        while (scheduler.completedCount("T") < 5 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(1);
+        }
         check(scheduler.completedCount("T") == 5, "expected 5 completions");
         scheduler.shutdown();
     }
