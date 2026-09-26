@@ -93,9 +93,13 @@ public final class Scheduler {
         String id = UUID.randomUUID().toString();
         synchronized (tenant.lock) {
             if (tenant.queue.isEmpty()) {
-                // A tenant rejoining the competition must not get a backlog
-                // discount from its stale virtual finish time.
-                tenant.virtualFinish = Math.max(tenant.virtualFinish, globalVirtual);
+                // A tenant rejoining the competition must not hoard virtual
+                // time while idle, but it may keep a bounded catch-up credit
+                // of one virtual work unit. Clamping all the way up to
+                // globalVirtual would equalise tenants that stay backlogged
+                // via continuous re-submission and destroy the weight ratio.
+                tenant.virtualFinish =
+                        Math.max(tenant.virtualFinish, globalVirtual - COST_SCALE);
             }
             tenant.queue.addLast(new Task(id, task));
         }
